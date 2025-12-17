@@ -1,0 +1,273 @@
+---
+title: "data-cleaning"
+format: html
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(stringr)
+```
+
+Read in raw data
+
+```{r}
+split1 <- fread('data/problem4_govuk_split1.csv')
+split2 <- fread('data/problem4_govuk_split2.csv')
+```
+
+Read in Local Authorities data
+
+```{r}
+la <- fread('data/local authority url name.csv', sep=',')
+names(la) <- c('id', 'word', 'name', 'code')
+```
+
+## Link parent URL to local authority names
+
+```{r}
+# get all unique parent URLs
+split1_parent <- unique(split1$parent_url)
+split2_parent <- unique(split2$parent_url)
+
+parent_urls <- data.frame(parent_url=unique(c(split1_parent, split2_parent)))
+
+
+parent_url_with_la <- parent_urls %>%
+  # create all combinations of URLs × words
+  cross_join(la) %>%
+  # check if each word appears in the URL
+  filter(str_detect(parent_url, fixed(word, ignore_case = TRUE))) %>%
+  # if multiple matches, keep first; if none, keep the URL with name = NA
+  group_by(parent_url) %>%
+  summarise(name = first(name), .groups = "drop") %>%
+  # join back to original URLs
+  right_join(parent_urls, by = "parent_url") %>%
+  relocate(name, .after = parent_url) %>%
+  filter(!is.na(name))
+
+write.csv(parent_url_with_la, 'data/derived/parent_url_with_la.csv')
+```
+
+## Filter data based on Local Authorities
+
+```{r}
+# filtered data by local authorities
+split1 <- split1 %>% filter(
+  parent_url %in% parent_url_with_la$parent_url
+)
+
+split2 <- split2 %>% filter(
+  parent_url %in% parent_url_with_la$parent_url
+)
+
+# combine splits
+full <- rbind(split1, split2)
+
+# join with Local Authority name
+full <- full %>%
+  right_join(parent_url_with_la, by = "parent_url")
+
+write.csv(full, 'data/derived/full.csv')
+```
+
+# Policy Keywords
+
+```{r}
+policy_keywords_broad <- list(
+  children_and_young_people = c(
+    "children", "youth", "education", "schools", "families",
+    "childcare", "young", "students", "learning", "support"
+  ),
+  communities = c(
+    "community", "local", "neighbourhood", "residents", "voluntary",
+    "groups", "engagement", "public", "civic", "local-services"
+  ),
+  community_safety = c(
+    "safety", "crime", "police", "security", "protection",
+    "violence", "emergency", "risk", "public-safety", "response"
+  ),
+  culture_tourism_leisure_sport = c(
+    "culture", "arts", "tourism", "heritage", "events",
+    "leisure", "sport", "recreation", "visitors", "activities"
+  ),
+  devolution = c(
+    "devolution", "governance", "regional", "authority", "powers",
+    "combined", "mayoral", "strategic", "local-government", "partnership"
+  ),
+  economic_growth = c(
+    "economy", "business", "growth", "investment", "industry",
+    "markets", "development", "enterprises", "productivity", "innovation"
+  ),
+  employment_and_skills = c(
+    "employment", "jobs", "skills", "training", "workforce",
+    "careers", "learning", "labour", "apprenticeships", "opportunities"
+  ),
+  climate_environment_waste = c(
+    "climate", "environment", "waste", "recycling", "sustainability",
+    "energy", "green", "biodiversity", "carbon", "pollution"
+  ),
+  european_international = c(
+    "international", "europe", "global", "foreign", "partners",
+    "cooperation", "projects", "network", "cross-border", "relations"
+  ),
+  finance_business_rates = c(
+    "finance", "budget", "revenue", "tax", "funding",
+    "rates", "accounts", "audit", "costs", "financial-management"
+  ),
+  fire_and_rescue = c(
+    "fire", "rescue", "emergency", "response", "incidents",
+    "prevention", "safety", "services", "risk", "protection"
+  ),
+  housing_and_planning = c(
+    "housing", "planning", "development", "land", "buildings",
+    "property", "homes", "infrastructure", "construction", "estates"
+  ),
+  licences_regulations_trading_standards = c(
+    "licensing", "regulation", "compliance", "standards", "inspection",
+    "permits", "trading", "consumer", "governance", "business-regulation"
+  ),
+  severe_weather = c(
+    "weather", "flooding", "storms", "snow", "resilience",
+    "weather-alerts", "emergency", "winter", "heat", "response"
+  ),
+  social_care_health_integration = c(
+    "health", "care", "social-care", "wellbeing", "support",
+    "public-health", "integration", "services", "community-health", "assistance"
+  ),
+  transport = c(
+    "transport", "roads", "traffic", "travel", "public-transport",
+    "highways", "mobility", "parking", "infrastructure", "cycling"
+  )
+)
+
+# Convert the policy keyword list into a long dataframe
+keywords_df <- tibble(
+  policy_area = names(policy_keywords_broad),
+  keywords = policy_keywords_broad
+) %>%
+  unnest_longer(keywords)
+
+```
+
+
+# Filter on London
+
+```{r}
+london_urls <- fread('london_council_url.csv') %>%
+  mutate(london_council_url = str_replace(london_council_url, 'https://', '')) %>%
+  filter(london_council_url != "")
+```
+
+```{r}
+full <- full %>%
+  select(url, parent_url, cc_url, content, name)
+
+parent_unique <- unique(full$parent_url)
+
+# filter data for London
+full_london <- full %>%
+  filter(str_detect(parent_url, str_c(london_urls$london_council_url, collapse = "|")))
+
+# add column indicating if policy keywords are present
+full_london_with_keyword_col <- full_london %>%
+  mutate(
+    keyword = map_lgl(
+      url,
+      ~ any(str_detect(.x, fixed(keywords_df$keywords, ignore_case = TRUE)))
+    )
+  )
+
+write.csv(full_london_with_keyword_col, 'data/derived/london_urls.csv')
+
+```
+
+# Filter on keywords (full UK)
+
+```{r}
+# extract only the urls
+full_urls <- full %>%
+  select(url, name)
+
+# Cross-join urls with keyword table
+df_expanded <- full_urls %>%
+  crossing(keywords_df)
+
+# Detect keyword presence (case-insensitive)
+df_detect <- df_expanded %>%
+  mutate(
+    match = str_detect(url, fixed(keywords, ignore_case = TRUE))
+  ) %>%
+  filter(match) %>%
+  distinct(name, policy_area, url)
+
+# Count URLs per local authority per policy area
+df_counts <- df_detect %>%
+  group_by(name, policy_area) %>%
+  summarise(n_urls = n(), .groups = "drop")
+
+# normalise URL counts
+df_count_normalised <- df_counts %>%
+  group_by(name) %>%
+  mutate(
+    total_urls = sum(n_urls),
+    proportion = n_urls / total_urls
+  ) %>%
+  ungroup()
+
+write.csv(df_count_normalised, 'data/derived/council-policy-urlcount-normalised.csv')
+```
+
+
+# London - keywords in content
+
+```{r}
+full_london <- fread('data/derived/london_urls.csv')
+
+full_london <- full_london[1:100]
+
+full_london_cleaned <- full_london %>%
+  rowwise() %>%
+  mutate(
+    content = content %>%
+      str_split("\r\n") %>%               # split text into lines
+      unlist() %>%                      # convert list to vector
+      str_trim() %>%                     # remove leading/trailing whitespace
+      .[nchar(.) >= 100] %>%             # keep only lines with >= 20 chars
+      paste(collapse = "\r\n")            # recombine lines
+  ) %>%
+  ungroup() %>%
+  filter(nchar(content) > 200)
+
+london_names <- full_london %>%
+  select(name)
+
+london_names <- london_names %>%
+    mutate(words = str_split(name, ' '))
+
+words <- unlist(london_names$words)
+words <- tolower(words)
+words <- unique(words)
+
+full_london_cleaned2 <- full_london_cleaned %>%
+  mutate(content = str_replace_all(content, 
+                              regex(paste(words, collapse = "|"), 
+                                    ignore_case = TRUE), 
+                              '')
+  )
+
+
+df_expanded <- full_urls %>%
+  crossing(keywords_df)
+
+# Detect keyword presence (case-insensitive)
+df_detect <- df_expanded %>%
+  mutate(
+    match = str_detect(url, fixed(keywords, ignore_case = TRUE))
+  ) %>%
+  filter(match) %>%
+  distinct(name, policy_area, url)
+```
+
+
+

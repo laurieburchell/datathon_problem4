@@ -1,0 +1,160 @@
+---
+title: "cluster-analysis"
+format: html
+---
+
+# Cluster analysis
+
+```{r}
+count_data <- fread('data/derived/council-policy-urlcount-normalised.csv') %>%
+  select(name, policy_area, proportion)
+```
+
+```{r}
+count_data <- count_data %>%
+  pivot_wider(
+    names_from = policy_area,
+    values_from = proportion
+  )
+```
+
+Convert data to matrix
+
+```{r}
+library(dplyr)
+
+df_mat <- count_data %>%
+  select(-name) %>%
+  as.matrix()
+
+row.names(df_mat) <- count_data$name
+df_mat[is.na(df_mat)] <- 0
+
+```
+
+Elbow plot
+
+```{r}
+library(ggplot2)
+set.seed(1)
+
+wss <- sapply(1:10, function(k) {
+  kmeans(df_mat, centers = k, nstart = 20)$tot.withinss
+})
+
+elbow <- data.frame(k = 1:10, wss = wss)
+
+ggplot(elbow, aes(k, wss)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal()
+```
+
+K-means clustering
+
+```{r}
+set.seed(123)
+
+km <- kmeans(df_mat, centers = 6, nstart = 50)
+
+```
+
+```{r}
+df_clusters <- count_data
+df_clusters$cluster <- km$cluster
+```
+
+
+```{r}
+cluster_summary <- df_clusters %>%
+  group_by(cluster) %>%
+  summarise(across(
+    .cols = -name,              # keep all policy-area columns
+    .fns  = list(mean = mean, sd = sd),
+    .names = "{.col}-{.fn}"
+  ))
+
+# Convert wide to long
+cluster_long <- cluster_summary %>%
+  pivot_longer(
+    cols = -cluster,
+    names_to = c("policy_area", "stat"),
+    names_sep = "-"
+  ) %>%
+  pivot_wider(
+    names_from = stat,
+    values_from = value
+  )
+
+cluster_long[is.na(cluster_long)] <- 0
+
+# Plot mean scores with error bars per cluster
+ggplot(cluster_long, aes(x = policy_area, y = mean, fill = factor(cluster))) +
+  geom_col(position = "dodge") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                position = position_dodge(width = 0.9), width = 0.2) +
+  labs(x = "Policy Area", y = "Mean Score", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+labels <- c('Youth', 'Climate', 'Community', 'Safety', 'Culture', 'Devolution', 'Economy', 'Employment', 'Europe', 'Finance', 'Rescue', 'Housing', 'Trading', 'Weather', 'Health', 'Transport')
+
+cluster_long$policy_area <- rep(labels, 6)
+
+# Create a numeric x-axis to add vertical separators
+cluster_long <- cluster_long %>%
+  mutate(x_pos = as.numeric(factor(policy_area)))
+
+# Plot
+# Ensure policy areas are in the correct order
+cluster_long <- cluster_long %>%
+  mutate(x_pos = as.numeric(factor(policy_area, levels = unique(policy_area))))
+
+# Plot
+ggplot(cluster_long, aes(x = x_pos, y = mean, fill = factor(cluster))) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                position = position_dodge(width = 0.8), width = 0.2) +
+  geom_vline(xintercept = seq(1.5, max(cluster_long$x_pos) - 0.5, by = 1),
+             color = "grey80", linetype = "dashed") +
+  scale_x_continuous(breaks = cluster_long$x_pos,
+                     labels = cluster_long$policy_area,   # <-- use your labels here
+                     expand = expansion(add = c(0.5, 0.5))) +
+  labs(x = "Policy Area", y = "Mean Score", fill = "Cluster") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+
+
+
+```
+
+
+```{r}
+library(ggplot2)
+
+pca <- prcomp(df_mat)
+
+plot_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  name = rownames(df_mat),
+  cluster = factor(km$cluster)
+)
+
+ggplot(plot_df, aes(PC1, PC2, colour = cluster, label = name)) +
+  geom_point(size = 3) +
+  geom_text(hjust = 0, nudge_x = 0.05, size = 3) +
+  theme_minimal()
+
+```
+
